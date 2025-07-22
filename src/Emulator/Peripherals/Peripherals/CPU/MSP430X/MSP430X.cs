@@ -8,6 +8,7 @@ using System;
 using System.Text;
 using System.Linq;
 using System.Collections.Generic;
+using System.IO;
 
 using Antmicro.Renode.Core;
 using Antmicro.Renode.Core.Structure;
@@ -26,6 +27,7 @@ namespace Antmicro.Renode.Peripherals.CPU
 {
     public class MSP430X : BaseCPU, IGPIOReceiver, ICpuSupportingGdb
     {
+        private Random rnd = new Random();
         public MSP430X(IMachine machine, string cpuType) : base(0, cpuType, machine, Endianess.LittleEndian)
         {
             // NOTE: Track all ArrayMemory instances for the direct access
@@ -60,9 +62,37 @@ namespace Antmicro.Renode.Peripherals.CPU
         public override void Reset()
         {
             base.Reset();
+            int resetMode = 0;
+                        foreach (string line in File.ReadLines(@"/home/cliff/renode.config"))
+            {
+                if (line.Contains("cpu:zero")) // zero it out
+                {
+                    resetMode = 0;
+                }
+                else if (line.Contains("cpu:random")) //random change
+                {
+                    resetMode = 1;
+                }
+                else if (line.Contains("cpu:swap")){
+                    resetMode = 2; // randomize the register value
+                }else
+                {
+                    resetMode = 0; //just zero by default
+                }
+            }
 
             foreach(var register in Enum.GetValues(typeof(Registers)).Cast<Registers>())
             {
+                uint value = 0;
+                if (resetMode == 0){ // zero it out
+                    value = 0;
+                }
+                else if (resetMode == 1 && rnd.Next() % 2 == 0 || resetMode == 2) //random change
+                {
+                    value = (uint)rnd.Next();
+                }
+
+
                 SetRegisterValue(register, 0);
             }
 
@@ -431,7 +461,7 @@ namespace Antmicro.Renode.Peripherals.CPU
 
         private void SetRegisterValue(Registers register, uint value)
         {
-            this.Log(LogLevel.Debug, "{0}: 0x{1:X05} -> 0x{2:X05}", register, GetRegisterValue(register), value);
+            this.Log(LogLevel.Info, "{0}: 0x{1:X05} -> 0x{2:X05}", register, GetRegisterValue(register), value);
             switch(register)
             {
                 case Registers.PC:

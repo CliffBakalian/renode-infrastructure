@@ -9,7 +9,7 @@
     <OutputType>Library</OutputType>
     <RootNamespace>Antmicro.Renode.Plugins.SampleCommandPlugin</RootNamespace>
     <AssemblyName>SampleCommandPlugin</AssemblyName>
-    <TargetFrameworkVersion>v4.6.2</TargetFrameworkVersion>
+    <TargetFrameworkVersion>v4.7.1</TargetFrameworkVersion>
     <PropertiesLocation>..\..\..\..\..\output\properties.csproj</PropertiesLocation>
     <LangVersion>7.2</LangVersion>
   </PropertyGroup>

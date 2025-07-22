@@ -7,7 +7,7 @@
     <OutputType>Library</OutputType>
     <RootNamespace>Antmicro.Renode.Plugins.TracePlugin</RootNamespace>
     <AssemblyName>TracePlugin</AssemblyName>
-    <TargetFrameworkVersion>v4.6.2</TargetFrameworkVersion>
+    <TargetFrameworkVersion>v4.7.1</TargetFrameworkVersion>
     <ProductVersion>8.0.30703</ProductVersion>
     <SchemaVersion>2.0</SchemaVersion>
     <PropertiesLocation>..\..\..\..\..\output\properties.csproj</PropertiesLocation>
