@@ -388,6 +388,11 @@ namespace Antmicro.Renode.Core
             return exists;
         }
 
+        public bool TryRemoveBusController(IBusPeripheral peripheral)
+        {
+            return peripheralsBusControllers.Remove(peripheral);
+        }
+
         public IBusController GetSystemBus(IBusPeripheral peripheral)
         {
             if(!TryGetBusController(peripheral, out var controller))
@@ -542,6 +547,7 @@ namespace Antmicro.Renode.Core
                             continue;
                         }
                         resetable.Reset();
+                        PeripheralReset?.Invoke(this, resetable);
                     }
                     var machineReset = MachineReset;
                     if(machineReset != null)
@@ -553,6 +559,7 @@ namespace Antmicro.Renode.Core
         }
 
         public bool InternalPause { get; private set; }
+        public bool IgnorePeripheralRegistrationConditions { get; set; }
 
         public void RequestResetInSafeState(Action postReset = null, ICollection<IPeripheral> unresetable = null)
         {
@@ -1307,6 +1314,8 @@ namespace Antmicro.Renode.Core
         [field: Transient]
         public event Action<IMachine> MachineReset;
         [field: Transient]
+        public event Action<IMachine, IPeripheral> PeripheralReset;
+        [field: Transient]
         public event Action<IMachine, PeripheralsChangedEventArgs> PeripheralsChanged;
         [field: Transient]
         public event Action<IMachine> RealTimeClockModeChanged;
@@ -1714,7 +1723,7 @@ namespace Antmicro.Renode.Core
                 foreach(var registration in SystemBus.GetRegistrationsForPeripheralType<Peripherals.Memory.ArrayMemory>(context))
                 {
                     var range = registration.RegistrationPoint.Range;
-                    var perCore = registration.RegistrationPoint.CPU;
+                    var perCore = registration.RegistrationPoint.Initiator;
                     if(perCore == null)
                     {
                         cpus = SystemBus.GetCPUs().OfType<ICPUWithMappedMemory>().ToArray();

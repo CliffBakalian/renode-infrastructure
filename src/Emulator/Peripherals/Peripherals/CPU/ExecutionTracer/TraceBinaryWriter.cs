@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2010-2024 Antmicro
+// Copyright (c) 2010-2025 Antmicro
 //
 // This file is licensed under the MIT License.
 // Full license text is available in 'licenses/MIT.txt'.
@@ -39,12 +39,13 @@ namespace Antmicro.Renode.Peripherals.CPU
             stream.WriteByte((byte)(IncludeOpcode ? 1 : 0));
             if(IncludeOpcode)
             {
-                LLVMArchitectureMapping.GetTripleAndModelKey(AttachedCPU, 0, out var triple, out var model);
+                var flags = 0u;
+                LLVMArchitectureMapping.GetTripleAndModelKey(AttachedCPU, ref flags, out var triple, out var model);
                 var tripleAndModelString = $"{triple} {model}";
-                usesThumbFlag = tripleAndModelString.Contains("armv7a");
+                usesMultipleInstructionSets = tripleAndModelString.Contains("armv7a") || tripleAndModelString.Contains("arm64");
                 var byteCount = Encoding.ASCII.GetByteCount(tripleAndModelString);
 
-                stream.WriteByte((byte)(usesThumbFlag ? 1 : 0));
+                stream.WriteByte((byte)(usesMultipleInstructionSets ? 1 : 0));
                 stream.WriteByte((byte)byteCount);
                 stream.Write(Encoding.ASCII.GetBytes(tripleAndModelString), 0, byteCount);
             }
@@ -58,12 +59,12 @@ namespace Antmicro.Renode.Peripherals.CPU
 
             var hasAdditionalData = block.AdditionalDataInTheBlock.TryDequeue(out var insnAdditionalData);
 
-            if(usesThumbFlag)
+            if(usesMultipleInstructionSets)
             {
-                // if the CPU supports thumb, we need to mark translation blocks
+                // if the CPU supports multiple instruction sets, we need to mark translation blocks
                 // with a flag and length of the block, that is needed to properly disassemble the trace
-                var isThumb = block.DisassemblyFlags > 0;
-                WriteByteToBuffer((byte)(isThumb ? 1 : 0));
+                var instructionSet = (byte)block.DisassemblyFlags;
+                WriteByteToBuffer(instructionSet);
                 WriteInstructionsCountToBuffer(block.InstructionsCount);
             }
 
@@ -102,7 +103,7 @@ namespace Antmicro.Renode.Peripherals.CPU
             }
         }
 
-        private bool usesThumbFlag;
+        private bool usesMultipleInstructionSets;
 
         private bool IncludeOpcode => this.format != TraceFormat.PC;
 
@@ -165,7 +166,7 @@ namespace Antmicro.Renode.Peripherals.CPU
 
             if(opcode.Length == 0)
             {
-                AttachedCPU.Log(LogLevel.Warning, "ExecutionTracer: Couldn't disassemble opcode at PC 0x{0:X}\n", pc);
+                AttachedCPU.Log(LogLevel.Warning, "ExecutionTracer: Couldn't disassemble opcode at PC 0x{0:X}", pc);
                 return false;
             }
 

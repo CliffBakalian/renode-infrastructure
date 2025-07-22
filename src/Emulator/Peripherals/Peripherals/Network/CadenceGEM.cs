@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2010-2023 Antmicro
+// Copyright (c) 2010-2025 Antmicro
 //
 // This file is licensed under the MIT License.
 // Full license text is available in 'licenses/MIT.txt'.
@@ -12,6 +12,7 @@ using Antmicro.Renode.Peripherals.Timers;
 using Antmicro.Renode.Core.Structure;
 using Antmicro.Renode.Logging;
 using Antmicro.Renode.Peripherals.Bus;
+using Antmicro.Renode.Peripherals.CPU;
 using System.Collections.Generic;
 using Antmicro.Renode.Network;
 using Antmicro.Renode.Utilities;
@@ -194,7 +195,7 @@ namespace Antmicro.Renode.Peripherals.Network
                                 this.Log(LogLevel.Warning, "Changing value of receive buffer queue base address while reception is enabled is illegal");
                                 return;
                             }
-                            rxDescriptorsQueue = new DmaBufferDescriptorsQueue<DmaRxBufferDescriptor>(sysbus, (uint)value << 2, (sb, addr) => new DmaRxBufferDescriptor(sb, addr, dmaAddressBusWith.Value, extendedRxBufferDescriptorEnabled.Value));
+                            rxDescriptorsQueue = new DmaBufferDescriptorsQueue<DmaRxBufferDescriptor>(sysbus, GetCurrentContext(), (uint)value << 2, (sb, ctx, addr) => new DmaRxBufferDescriptor(sb, ctx, addr, dmaAddressBusWith.Value, extendedRxBufferDescriptorEnabled.Value));
                         })
                 },
 
@@ -230,7 +231,7 @@ namespace Antmicro.Renode.Peripherals.Network
                                 this.Log(LogLevel.Warning, "Changing value of transmit buffer queue base address while transmission is started is illegal");
                                 return;
                             }
-                            txDescriptorsQueue = new DmaBufferDescriptorsQueue<DmaTxBufferDescriptor>(sysbus, (uint)value << 2, (sb, addr) => new DmaTxBufferDescriptor(sb, addr, dmaAddressBusWith.Value, extendedTxBufferDescriptorEnabled.Value));
+                            txDescriptorsQueue = new DmaBufferDescriptorsQueue<DmaTxBufferDescriptor>(sysbus, GetCurrentContext(), (uint)value << 2, (sb, ctx, addr) => new DmaTxBufferDescriptor(sb, ctx, addr, dmaAddressBusWith.Value, extendedTxBufferDescriptorEnabled.Value));
                         })
                 },
 
@@ -352,6 +353,19 @@ namespace Antmicro.Renode.Peripherals.Network
                     .WithTag("tx_pbuf_addr", 26, 4)
                     .WithTag("axi", 30, 1)
                     .WithTag("spram", 31, 1)
+                },
+
+                {(long)Registers.DesignConfiguration6, new DoubleWordRegister(this)
+                    .WithReservedBits(0, 1)
+                    .WithTaggedFlags("dma_priority_queue", 1, 15)
+                    .WithTag("tx_pbuf_queue_segment_size", 16, 4)
+                    .WithTag("ext_tsu_timer", 20, 1)
+                    .WithTag("tx_add_fifo_if", 21, 1)
+                    .WithTag("host_if_soft_select", 22, 1)
+                    .WithFlag(23, FieldMode.Read, name: "dma_addr_width_is_64b", valueProviderCallback: _ => true)
+                    .WithTag("pfc_multi_quantum", 24, 1)
+                    .WithTag("pbuf_cutthru", 25, 1)
+                    .WithReservedBits(26, 6)
                 },
 
                 {(long)Registers.Timer1588SecondsLow, new DoubleWordRegister(this)
@@ -672,6 +686,16 @@ namespace Antmicro.Renode.Peripherals.Network
             }
         }
 
+        private ICPU GetCurrentContext()
+        {
+            if(!sysbus.TryGetCurrentCPU(out var cpu))
+            {
+                this.Log(LogLevel.Debug, "Failed to retrieve context, only global peripherals will be accessible by DMA");
+                return null;
+            }
+            return cpu;
+        }
+
         private uint phyDataRead;
         private bool isTransmissionStarted;
         private DmaBufferDescriptorsQueue<DmaTxBufferDescriptor> txDescriptorsQueue;
@@ -705,9 +729,10 @@ namespace Antmicro.Renode.Peripherals.Network
 
         private class DmaBufferDescriptorsQueue<T> where T : DmaBufferDescriptor
         {
-            public DmaBufferDescriptorsQueue(IBusController bus, uint baseAddress, Func<IBusController, uint, T> creator)
+            public DmaBufferDescriptorsQueue(IBusController bus, ICPU context, ulong baseAddress, Func<IBusController, ICPU, ulong, T> creator)
             {
                 this.bus = bus;
+                this.context = context;
                 this.creator = creator;
                 this.baseAddress = baseAddress;
                 descriptors = new List<T>();
@@ -720,7 +745,7 @@ namespace Antmicro.Renode.Peripherals.Network
                 if(descriptors.Count == 0)
                 {
                     // this is the first descriptor - read it from baseAddress
-                    descriptors.Add(creator(bus, baseAddress));
+                    descriptors.Add(creator(bus, context, baseAddress));
                     currentDescriptorIndex = 0;
                 }
                 else
@@ -736,7 +761,7 @@ namespace Antmicro.Renode.Peripherals.Network
                         if(currentDescriptorIndex == descriptors.Count - 1)
                         {
                             // we need to generate new descriptor
-                            descriptors.Add(creator(bus, CurrentDescriptor.LowerDescriptorAddress + CurrentDescriptor.SizeInBytes));
+                            descriptors.Add(creator(bus, context, CurrentDescriptor.GetDescriptorAddress() + CurrentDescriptor.SizeInBytes));
                         }
                         currentDescriptorIndex++;
                     }
@@ -756,18 +781,21 @@ namespace Antmicro.Renode.Peripherals.Network
             private int currentDescriptorIndex;
 
             private readonly List<T> descriptors;
-            private readonly uint baseAddress;
+            private readonly ulong baseAddress;
             private readonly IBusController bus;
-            private readonly Func<IBusController, uint, T> creator;
+            private readonly ICPU context;
+            private readonly Func<IBusController, ICPU, ulong, T> creator;
         }
 
         private abstract class DmaBufferDescriptor
         {
-            protected DmaBufferDescriptor(IBusController bus, uint address, DMAAddressWidth dmaAddressWidth, bool isExtendedModeEnabled)
+            protected DmaBufferDescriptor(IBusController bus, ICPU context, ulong address, DMAAddressWidth dmaAddressWidth, bool isExtendedModeEnabled)
             {
                 this.dmaAddressWidth = dmaAddressWidth;
                 Bus = bus;
-                LowerDescriptorAddress = address;
+                Context = context;
+                LowerDescriptorAddress = (uint)address;
+                UpperDescriptorAddress = (uint)(address >> 32);
                 IsExtendedModeEnabled = isExtendedModeEnabled;
                 SizeInBytes = InitWords();
             }
@@ -777,7 +805,7 @@ namespace Antmicro.Renode.Peripherals.Network
                 var tempOffset = 0UL;
                 for(var i = 0; i < words.Length; ++i)
                 {
-                    words[i] = Bus.ReadDoubleWord(GetDescriptorAddress() + tempOffset);
+                    words[i] = Bus.ReadDoubleWord(GetDescriptorAddress() + tempOffset, Context);
                     tempOffset += 4;
                 }
             }
@@ -787,9 +815,14 @@ namespace Antmicro.Renode.Peripherals.Network
                 var tempOffset = 0UL;
                 foreach(var word in words)
                 {
-                    Bus.WriteDoubleWord(GetDescriptorAddress() + tempOffset, word);
+                    Bus.WriteDoubleWord(GetDescriptorAddress() + tempOffset, word, Context);
                     tempOffset += 4;
                 }
+            }
+
+            public ulong GetDescriptorAddress()
+            {
+                return dmaAddressWidth == DMAAddressWidth.Bit64 ? (((ulong)UpperDescriptorAddress << 32) | LowerDescriptorAddress) : LowerDescriptorAddress;
             }
 
             public ulong GetBufferAddress()
@@ -798,6 +831,11 @@ namespace Antmicro.Renode.Peripherals.Network
             }
 
             public IBusController Bus { get; }
+            // The descriptor and its buffers are bound to the CPU that configured the descriptor into the
+            // peripheral, this means they can access memory that is local to the CPU.
+            // If the descriptor was not configured by a CPU, this field is null and only global peripherals
+            // can be accessed.
+            public ICPU Context { get; }
             public uint SizeInBytes { get; }
             public bool IsExtendedModeEnabled { get; }
             public uint LowerDescriptorAddress { get; set; }
@@ -857,11 +895,6 @@ namespace Antmicro.Renode.Peripherals.Network
                 return (uint)words.Length * 4;
             }
 
-            private ulong GetDescriptorAddress()
-            {
-                return dmaAddressWidth == DMAAddressWidth.Bit64 ? (((ulong)UpperDescriptorAddress << 32) | LowerDescriptorAddress) : LowerDescriptorAddress;
-            }
-
             private readonly DMAAddressWidth dmaAddressWidth;
         }
 
@@ -905,7 +938,7 @@ namespace Antmicro.Renode.Peripherals.Network
         ///     * 4-31: Reserved
         private class DmaRxBufferDescriptor : DmaBufferDescriptor
         {
-            public DmaRxBufferDescriptor(IBusController bus, uint address, DMAAddressWidth addressWidth, bool extendedModeEnabled) : base(bus, address, addressWidth, extendedModeEnabled)
+            public DmaRxBufferDescriptor(IBusController bus, ICPU context, ulong address, DMAAddressWidth addressWidth, bool extendedModeEnabled) : base(bus, context, address, addressWidth, extendedModeEnabled)
             {
             }
 
@@ -917,7 +950,7 @@ namespace Antmicro.Renode.Peripherals.Network
                 }
 
                 Length = length;
-                Bus.WriteBytes(bytes, GetBufferAddress() + offset, true);
+                Bus.WriteBytes(bytes, GetBufferAddress() + offset, true, Context);
                 Ownership = true;
 
                 return true;
@@ -1007,13 +1040,13 @@ namespace Antmicro.Renode.Peripherals.Network
         ///     * 4-31: Reserved
         private class DmaTxBufferDescriptor : DmaBufferDescriptor
         {
-            public DmaTxBufferDescriptor(IBusController bus, uint address, DMAAddressWidth addressWidth, bool extendedModeEnabled) : base(bus, address, addressWidth, extendedModeEnabled)
+            public DmaTxBufferDescriptor(IBusController bus, ICPU context, ulong address, DMAAddressWidth addressWidth, bool extendedModeEnabled) : base(bus, context, address, addressWidth, extendedModeEnabled)
             {
             }
 
             public byte[] ReadBuffer()
             {
-                var result = Bus.ReadBytes(GetBufferAddress(), Length, true);
+                var result = Bus.ReadBytes(GetBufferAddress(), Length, true, Context);
                 IsUsed = true;
                 return result;
             }
@@ -1084,7 +1117,8 @@ namespace Antmicro.Renode.Peripherals.Network
             ReceiveComplete = 1,
             ReceiveUsedBitRead = 2,
             TransmitUsedBitRead = 3,
-            TransmitComplete = 7
+            TransmitComplete = 7,
+            ReceiveOverrun = 10,
         }
 
         private enum PhyOperation
@@ -1206,6 +1240,7 @@ namespace Antmicro.Renode.Peripherals.Network
             DesignConfiguration3 = 0x288,
             DesignConfiguration4 = 0x28C,
             DesignConfiguration5 = 0x290,
+            DesignConfiguration6 = 0x294,
             // gap intended
             InterruptStatusPriorityQueue1 = 0x400,
             InterruptStatusPriorityQueue2 = 0x404,

@@ -159,7 +159,10 @@ namespace Antmicro.Renode.Utilities.Binding
             var invoke = importType.GetMethod("Invoke");
             Type[] paramTypes = invoke.GetParameters().Select(p => p.ParameterType).ToArray();
             Type[] paramTypesWithWrappersType = new Type[] { wrappersType }.Concat(paramTypes).ToArray();
-            DynamicMethod method = new DynamicMethod(importField.Name, invoke.ReturnType, paramTypesWithWrappersType, wrappersType);
+            // We need skipVisibility to handle methods that have a protected or private type as a parameter or return value.
+            // Interesting tidbit: this access check is only performed by .NET Framework, Mono and .NET Core allow it
+            // without skipVisibility.
+            DynamicMethod method = new DynamicMethod(importField.Name, invoke.ReturnType, paramTypesWithWrappersType, wrappersType, skipVisibility: true);
             var il = method.GetILGenerator();
 
             il.Emit(OpCodes.Ldarg_0); // wrappersType instance
@@ -296,7 +299,9 @@ namespace Antmicro.Renode.Utilities.Binding
             var symbols = SharedLibraries.GetAllSymbols(libraryFileName);
             var classMethods = classToBind.GetType().GetAllMethods().ToArray();
             var exportedMethods = new List<MethodInfo>();
-            foreach(var originalCandidate in symbols.Where(x => x.Contains("renode_external_attach")))
+            // When tlib is built with gcov coverage reporting it creates functions prefixed with __gcov for each function in the binary
+            // so we need to exclude those since they should not be bound here
+            foreach(var originalCandidate in symbols.Where(x => x.Contains("renode_external_attach") && !x.StartsWith("__gcov")))
             {
                 var candidate  = FilterCppName(originalCandidate);
                 var parts = candidate.Split(new [] { "__" }, StringSplitOptions.RemoveEmptyEntries);
@@ -304,28 +309,29 @@ namespace Antmicro.Renode.Utilities.Binding
                 var expectedTypeName = parts[1];
                 var csName = cName.StartsWith('$') ? GetCSharpName(cName.Substring(1)) : cName;
                 classToBind.NoisyLog("(NativeBinder) Binding {0} as {2} of type {1}.", cName, expectedTypeName, csName);
+
                 // let's find the desired method
-                var desiredMethodInfo = classMethods.FirstOrDefault(x => x.Name == csName);
+                var desiredMethodInfo = classMethods.FirstOrDefault(method =>
+                {
+                    var parameterTypes = method.GetParameters().Select(p => p.ParameterType).ToList();
+                    var actualTypeName = ShortTypeNameFromParamsAndReturn(parameterTypes, method.ReturnType);
+
+                    return method.Name == csName &&
+                        expectedTypeName == actualTypeName &&
+                        method.IsDefined(typeof(ExportAttribute), true);
+                });
+
                 if(desiredMethodInfo == null)
                 {
-                    throw new InvalidOperationException(string.Format("Could not find method {0} in a class {1}.",
-                                                                      csName, classToBind.GetType().Name));
-                }
-                if(!desiredMethodInfo.IsDefined(typeof(ExportAttribute), true))
-                {
                     throw new InvalidOperationException(
-                        string.Format("Method {0} is exported as {1} but it is not marked with the Export attribute.",
-                                  desiredMethodInfo.Name, cName));
+                        $"Could not find method {csName} of type {expectedTypeName} marked with the [Export] attribute in the class {classToBind.GetType().Name}."
+                    );
                 }
-                var parameterTypes = desiredMethodInfo.GetParameters().Select(p => p.ParameterType).ToList();
-                var actualTypeName = ShortTypeNameFromParamsAndReturn(parameterTypes, desiredMethodInfo.ReturnType);
-                if(expectedTypeName != actualTypeName)
-                {
-                    throw new InvalidOperationException($"Method {cName} has type {actualTypeName} but the native library expects {expectedTypeName}");
-                }
+
+                var desiredParameterTypes = desiredMethodInfo.GetParameters().Select(p => p.ParameterType).ToList();
                 exportedMethods.Add(desiredMethodInfo);
                 // let's make the delegate instance
-                var delegateType = DelegateTypeFromParamsAndReturn(parameterTypes, desiredMethodInfo.ReturnType);
+                var delegateType = DelegateTypeFromParamsAndReturn(desiredParameterTypes, desiredMethodInfo.ReturnType);
                 Delegate attachee;
                 try
                 {

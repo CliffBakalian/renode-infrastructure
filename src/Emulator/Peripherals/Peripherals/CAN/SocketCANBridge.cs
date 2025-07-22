@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2010-2024 Antmicro
+// Copyright (c) 2010-2025 Antmicro
 //
 // This file is licensed under the MIT License.
 // Full license text is available in 'licenses/MIT.txt'.
@@ -71,6 +71,16 @@ namespace Antmicro.Renode.Peripherals.CAN
             StartTransmitThread();
         }
 
+        public void SendFrameToHost(uint id, string data, bool extendedFormat = false, bool remoteFrame = false, bool fdFormat = false, bool bitRateSwitch = false)
+        {
+            OnFrameReceived(new CANMessageFrame(id, Misc.HexStringToByteArray(data), extendedFormat, remoteFrame, fdFormat, bitRateSwitch));
+        }
+
+        public void SendFrameToMachine(uint id, string data, bool extendedFormat = false, bool remoteFrame = false, bool fdFormat = false, bool bitRateSwitch = false)
+        {
+            FrameSent?.Invoke(new CANMessageFrame(id, Misc.HexStringToByteArray(data), extendedFormat, remoteFrame, fdFormat, bitRateSwitch));
+        }
+
         public void Reset()
         {
             // intentionally left empty
@@ -83,7 +93,7 @@ namespace Antmicro.Renode.Peripherals.CAN
             byte[] frame;
             try
             {
-                frame = message.ToSocketCAN(true);
+                frame = message.ToSocketCAN();
             }
             catch(RecoverableException e)
             {
@@ -159,7 +169,7 @@ namespace Antmicro.Renode.Peripherals.CAN
 
                 buffer.AddRange(data);
 
-                if(!buffer.TryDecodeAsSocketCANFrame(out var frame, false))
+                if(!buffer.TryDecodeAsSocketCANFrame(out var frame))
                 {
                     // not enough bytes
                     continue;

@@ -18,14 +18,15 @@ namespace Antmicro.Renode.Peripherals.UART
     [AllowedTranslations(AllowedTranslation.ByteToDoubleWord | AllowedTranslation.WordToDoubleWord)]
     public class Cadence_UART : UARTBase, IUARTWithBufferState, IDoubleWordPeripheral, IKnownSize
     {
-        public Cadence_UART(IMachine machine, bool clearInterruptStatusOnRead = false, ulong clockFrequency = 50000000) : base(machine)
+        public Cadence_UART(IMachine machine, bool clearInterruptStatusOnRead = false, ulong clockFrequency = 50000000, int fifoCapacity = 64) : base(machine)
         {
+            this.fifoCapacity = fifoCapacity;
             this.clearInterruptStatusOnRead = clearInterruptStatusOnRead;
             this.clockFrequency = clockFrequency;
             registers = new DoubleWordRegisterCollection(this, BuildRegisterMap());
 
             rxFifoOverflow = new CadenceInterruptFlag(() => false);
-            rxFifoFull = new CadenceInterruptFlag(() => Count >= FifoCapacity);
+            rxFifoFull = new CadenceInterruptFlag(() => Count >= fifoCapacity);
             rxFifoTrigger = new CadenceInterruptFlag(() => Count >= (int)rxTriggerLevel.Value && rxTriggerLevel.Value > 0);
             rxFifoEmpty = new CadenceInterruptFlag(() => Count == 0);
             rxTimeoutError = new CadenceInterruptFlag(() => false);
@@ -50,7 +51,7 @@ namespace Antmicro.Renode.Peripherals.UART
                 return;
             }
 
-            if(Count < FifoCapacity)
+            if(Count < fifoCapacity)
             {
                 base.WriteChar(value);
                 UpdateBufferState();
@@ -470,6 +471,21 @@ namespace Antmicro.Renode.Peripherals.UART
                 {(long)Registers.BaudRateDivider, new DoubleWordRegister(this, resetValue: 0x0000000F)
                     .WithReservedBits(8, 24)
                     .WithValueField(0, 8, out baudDivider, name: "baudRateDivider")
+                },
+                {(long)Registers.RxFifoByteStatus, new DoubleWordRegister(this)
+                    .WithReservedBits(12, 20)
+                    .WithTaggedFlag("byte3_break", 11)
+                    .WithTaggedFlag("byte3_frm_err", 10)
+                    .WithTaggedFlag("byte3_par_err", 9)
+                    .WithTaggedFlag("byte2_break", 8)
+                    .WithTaggedFlag("byte2_frm_err", 7)
+                    .WithTaggedFlag("byte2_par_err", 6)
+                    .WithTaggedFlag("byte1_break", 5)
+                    .WithTaggedFlag("byte1_frm_err", 4)
+                    .WithTaggedFlag("byte1_par_err", 3)
+                    .WithTaggedFlag("byte0_break", 2)
+                    .WithTaggedFlag("byte0_frm_err", 1)
+                    .WithTaggedFlag("byte0_par_err", 0)
                 }
             };
         }
@@ -509,7 +525,7 @@ namespace Antmicro.Renode.Peripherals.UART
         private readonly bool clearInterruptStatusOnRead;
         private readonly ulong clockFrequency;
 
-        private const int FifoCapacity = 64;
+        private int fifoCapacity;
 
         private enum InternalStop
         {

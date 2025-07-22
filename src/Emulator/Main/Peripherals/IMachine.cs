@@ -98,8 +98,10 @@ namespace Antmicro.Renode.Core
         RealTimeClockMode RealTimeClockMode { get; set; }
         DateTime RealTimeClockStart { get; }
         bool InternalPause { get; }
+        bool IgnorePeripheralRegistrationConditions { get; set; }
 
         event Action<IMachine> MachineReset;
+        event Action<IMachine, IPeripheral> PeripheralReset;
         event Action<IMachine, PeripheralsChangedEventArgs> PeripheralsChanged;
         event Action<IMachine> RealTimeClockModeChanged;
         event Action<IMachine, MachineStateChangedEventArgs> StateChanged;

@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2010-2024 Antmicro
+// Copyright (c) 2010-2025 Antmicro
 // Copyright (c) 2011-2015 Realtime Embedded
 //
 // This file is licensed under the MIT License.
@@ -7,6 +7,7 @@
 //
 
 using System;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Collections.Generic;
@@ -33,7 +34,7 @@ namespace Antmicro.Renode.Peripherals.CPU.Disassembler
         {
             return GetDisassembler(flags).TryDisassembleInstruction(pc, data, flags, out result, memoryOffset);
         }
-        
+
         public bool TryDecodeInstruction(ulong pc, byte[] memory, uint flags, out byte[] opcode, int memoryOffset = 0)
         {
             return GetDisassembler(flags).TryDecodeInstruction(pc, memory, flags, out opcode, memoryOffset);
@@ -48,10 +49,10 @@ namespace Antmicro.Renode.Peripherals.CPU.Disassembler
             {
                 if(!TryDisassembleInstruction(pc, memory, flags, out var result, memoryOffset: sofar))
                 {
-                    strBldr.AppendLine("Disassembly error detected. The rest of the output will be truncated.");
+                    strBldr.AppendFormat("Disassembly error detected. The rest of the output ({0}) will be truncated.", memory.Skip(sofar).ToLazyHexString());
                     break;
                 }
-                
+
                 if(result.OpcodeSize == 0)
                 {
                     strBldr.AppendFormat("0x{0:x8}:  ", pc).AppendLine("No valid instruction, disassembling stopped.");
@@ -72,7 +73,7 @@ namespace Antmicro.Renode.Peripherals.CPU.Disassembler
 
         private IDisassembler GetDisassembler(uint flags)
         {
-            LLVMArchitectureMapping.GetTripleAndModelKey(cpu, flags, out var triple, out var model);
+            LLVMArchitectureMapping.GetTripleAndModelKey(cpu, ref flags, out var triple, out var model);
             var key = $"{triple} {model} {flags}";
             if(!cache.ContainsKey(key))
             {
@@ -94,7 +95,7 @@ namespace Antmicro.Renode.Peripherals.CPU.Disassembler
 
         private readonly Dictionary<string, IDisassembler> cache;
         private readonly ICPU cpu;
-        
+
         private class LLVMDisasWrapper : IDisposable, IDisassembler
         {
             public LLVMDisasWrapper(string cpu, string triple, uint flags)
@@ -133,13 +134,15 @@ namespace Antmicro.Renode.Peripherals.CPU.Disassembler
                 case "arm":
                 case "armv7a":
                 case "arm64":
+                case "msp430":
+                case "msp430x":
                     HexFormatter = FormatHexForARM;
                     break;
                 default:
                     throw new ArgumentOutOfRangeException("cpu", "CPU not supported.");
                 }
             }
-            
+
             public void Dispose()
             {
                 if(context != IntPtr.Zero)
@@ -161,7 +164,7 @@ namespace Antmicro.Renode.Peripherals.CPU.Disassembler
                     result = default(DisassemblyResult);
                     return false;
                 }
-                
+
                 var strBldr = new StringBuilder();
                 if(!HexFormatter(strBldr, bytes, memoryOffset, data))
                 {
@@ -176,7 +179,7 @@ namespace Antmicro.Renode.Peripherals.CPU.Disassembler
                     OpcodeString = strBldr.ToString().Replace(" ", ""),
                     DisassemblyString = Marshal.PtrToStringAnsi(strBuf)
                 };
-                
+
                 Marshal.FreeHGlobal(strBuf);
                 Marshal.FreeHGlobal(marshalledData);
                 return true;
@@ -189,7 +192,7 @@ namespace Antmicro.Renode.Peripherals.CPU.Disassembler
                     opcode = new byte[0];
                     return false;
                 }
-                
+
                 opcode = Misc.HexStringToByteArray(result.OpcodeString.Trim(), true);
                 return true;
             }
@@ -266,7 +269,7 @@ namespace Antmicro.Renode.Peripherals.CPU.Disassembler
 
             private readonly IntPtr context;
         }
-        
+
         private class CortexMDisassemblerWrapper : IDisassembler
         {
             public CortexMDisassemblerWrapper(IDisassembler actualDisassembler)

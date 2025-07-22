@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2010-2024 Antmicro
+// Copyright (c) 2010-2025 Antmicro
 // Copyright (c) 2011-2015 Realtime Embedded
 //
 // This file is licensed under the MIT License.
@@ -19,6 +19,7 @@ using System.Threading;
 using Antmicro.Renode.Backends.Terminals;
 using Antmicro.Renode.Core;
 using Antmicro.Renode.Debugging;
+using Antmicro.Renode.Exceptions;
 using Antmicro.Renode.Peripherals;
 using Antmicro.Renode.Peripherals.UART;
 using Antmicro.Renode.Time;
@@ -31,17 +32,18 @@ namespace Antmicro.Renode.Testing
 {
     public class TerminalTester : BackendTerminal
     {
-        public TerminalTester(TimeInterval timeout, EndLineOption endLineOption = EndLineOption.TreatLineFeedAsEndLine, bool removeColors = true)
+        public TerminalTester(TimeInterval timeout, EndLineOption endLineOption = EndLineOption.TreatLineFeedAsEndLine, bool binaryMode = false)
         {
             GlobalTimeout = timeout;
             this.endLineOption = endLineOption;
-            this.removeColors = removeColors;
+            this.binaryMode = binaryMode;
             charEvent = new AutoResetEvent(false);
             matchEvent = new AutoResetEvent(false);
             lines = new List<Line>();
             currentLineBuffer = new SafeStringBuilder();
             sgrDecodingBuffer = new SafeStringBuilder();
             report = new SafeStringBuilder();
+            failingStrings = new List<FailingString>();
         }
 
         public override void AttachTo(IUART uart)
@@ -89,12 +91,12 @@ namespace Antmicro.Renode.Testing
 
         public override void WriteChar(byte value)
         {
-            if(value == CarriageReturn && endLineOption == EndLineOption.TreatLineFeedAsEndLine)
+            if(!binaryMode && value == CarriageReturn && endLineOption == EndLineOption.TreatLineFeedAsEndLine)
             {
                 return;
             }
 
-            if(value != (endLineOption == EndLineOption.TreatLineFeedAsEndLine ? LineFeed : CarriageReturn))
+            if(binaryMode || value != (endLineOption == EndLineOption.TreatLineFeedAsEndLine ? LineFeed : CarriageReturn))
             {
                 AppendCharToBuffer((char)value);
             }
@@ -120,27 +122,30 @@ namespace Antmicro.Renode.Testing
                     return;
                 }
 
-                testerResult = resultMatcher.Invoke();
-#if DEBUG_EVENTS
-                this.Log(LogLevel.Noisy, "Matching result: {0}", testerResult);
-#endif
-                // If there was no match, we just keep waiting
                 if(testerResult == null)
                 {
+                    // First check for failing strings
+                    testerResult = MatchFailingStrings() ?? resultMatcher.Invoke();
+#if DEBUG_EVENTS
+                    this.Log(LogLevel.Noisy, "Matching result: {0}", testerResult);
+#endif
+                }
+                // If there was no match, we just keep waiting
+                if(testerResult != null)
+                {
+                    // Stop matching if we have already matched something
+                    resultMatcher = null;
+
+                    if(pauseEmulation)
+                    {
+                        machine.PauseAndRequestEmulationPause(precise: true);
+                        pauseEmulation = false;
+                    }
+
+                    matchEvent.Set();
                     return;
                 }
-
-                // Stop matching if we have already matched something
-                resultMatcher = null;
-
-                if(pauseEmulation)
-                {
-                    machine.PauseAndRequestEmulationPause(precise: true);
-                    pauseEmulation = false;
-                }
             }
-
-            matchEvent.Set();
         }
 
         public TerminalTesterResult WaitFor(string pattern, TimeInterval? timeout = null, bool treatAsRegex = false, bool includeUnfinishedLine = false, bool pauseEmulation = false, bool matchNextLine = false)
@@ -150,6 +155,15 @@ namespace Antmicro.Renode.Testing
             this.Log(LogLevel.Noisy, "Waiting for a line containing >>{0}<< (include unfinished line: {1}, with timeout {2}, regex {3}, pause on match {4}, match next line {5}) ",
                 pattern, includeUnfinishedLine, timeout ?? GlobalTimeout, treatAsRegex, pauseEmulation, matchNextLine);
 #endif
+
+            if(binaryMode && !treatAsRegex)
+            {
+                // The pattern is provided as a hex string. Parse it to a byte array and then decode
+                // using the Latin1 encoding which passes through byte values as character values (that is,
+                // { 0x00, 0x80, 0xff } becomes "\x00\x80\xff") to convert to a string where each char
+                // is equivalent to one input byte.
+                pattern = Encoding.GetEncoding("iso-8859-1").GetString(Misc.HexStringToByteArray(pattern, ignoreWhitespace: true));
+            }
 
             var result = WaitForMatch(() =>
             {
@@ -164,8 +178,7 @@ namespace Antmicro.Renode.Testing
                     return null;
                 }
 
-                return CheckUnfinishedLine(pattern, treatAsRegex, eventName);
-
+                return CheckUnfinishedLine(pattern, treatAsRegex, eventName, matchAtStart: matchNextLine);
             }, timeout ?? GlobalTimeout, pauseEmulation);
 
             if(result == null)
@@ -289,8 +302,22 @@ namespace Antmicro.Renode.Testing
             return generatedReport;
         }
 
+        public void RegisterFailingString(string pattern, bool treatAsRegex)
+        {
+            failingStrings.Add(new FailingString(pattern, treatAsRegex));
+        }
+
+        public void UnregisterFailingString(string pattern, bool treatAsRegex)
+        {
+            if(!failingStrings.Remove(new FailingString(pattern, treatAsRegex)))
+            {
+                throw new RecoverableException("Unable to unregister failing string, entry not found");
+            }
+        }
+
         public TimeInterval GlobalTimeout { get; set; }
         public TimeSpan WriteCharDelay { get; set; }
+        public bool BinaryMode => binaryMode;
 
         private void HandleDelayedChars()
         {
@@ -326,7 +353,7 @@ namespace Antmicro.Renode.Testing
                 this.pauseEmulation = pauseEmulation;
 
                 // Handle the case where the match has already happened
-                immediateResult = resultMatcher.Invoke();
+                immediateResult = MatchFailingStrings() ?? resultMatcher.Invoke();
                 if(immediateResult != null)
                 {
                     // Prevent matching in CharReceived in this case
@@ -473,7 +500,7 @@ namespace Antmicro.Renode.Testing
             }
         }
 
-        private TerminalTesterResult CheckUnfinishedLine(string pattern, bool regex, string eventName)
+        private TerminalTesterResult CheckUnfinishedLine(string pattern, bool regex, string eventName, bool matchAtStart = false)
         {
             var content = currentLineBuffer.ToString();
 
@@ -481,23 +508,46 @@ namespace Antmicro.Renode.Testing
             this.Log(LogLevel.Noisy, "Current line buffer content: >>{0}<<", content);
 #endif
 
-            var isMatch = false;
+            var matchStart = -1;
+            var matchEnd = -1;
             string[] matchGroups = null;
 
             if(regex)
             {
-                var match = Regex.Match(content, pattern);
-                isMatch = match.Success;
-                matchGroups = GetMatchGroups(match);
+                // In binary mode, make . match any character
+                var options = binaryMode ? RegexOptions.Singleline : 0;
+                var match = Regex.Match(content, pattern, options);
+                if(match.Success)
+                {
+                    matchStart = match.Index;
+                    matchEnd = match.Index + match.Length;
+                    matchGroups = GetMatchGroups(match);
+                }
             }
             else
             {
-                isMatch = content.Contains(pattern);
+                // In binary mode, use ordinal (here: raw byte value) comparison.
+                var comparisonType = binaryMode ? StringComparison.Ordinal : StringComparison.CurrentCulture;
+                matchStart = content.IndexOf(pattern, comparisonType);
+                if(matchStart != -1)
+                {
+                    matchEnd = matchStart + pattern.Length;
+                }
             }
 
-            if(isMatch)
+            // If we want a match at the start, then anything other than 0 simply won't cut it.
+            if(matchAtStart && matchStart != 0)
             {
-                return HandleSuccess(eventName, matchingLineId: CurrentLine, matchGroups: matchGroups);
+                return null;
+            }
+
+            // We know the match was successful, but only want to cut the current line buffer exactly when in binary mode.
+            // Otherwise, we just throw out the whole thing.
+            if(matchStart != -1)
+            {
+                return HandleSuccess(eventName, matchingLineId: CurrentLine, matchGroups: matchGroups,
+                    matchStart: binaryMode ? matchStart : 0,
+                    matchEnd: binaryMode ? (int?)matchEnd : null);
             }
 
             return null;
@@ -528,7 +578,7 @@ namespace Antmicro.Renode.Testing
 #if DEBUG_EVENTS
             this.Log(LogLevel.Noisy, "Appending char >>{0}<< to buffer in state {1}", value, sgrDecodingState);
 #endif
-            if(!removeColors)
+            if(binaryMode)
             {
                 currentLineBuffer.Append(value);
                 return;
@@ -584,7 +634,7 @@ namespace Antmicro.Renode.Testing
         private const int NoLine = -2;
         private const int CurrentLine = -1;
 
-        private TerminalTesterResult HandleSuccess(string eventName, int matchingLineId, string[] matchGroups = null)
+        private TerminalTesterResult HandleSuccess(string eventName, int matchingLineId, string[] matchGroups = null, int matchStart = 0, int? matchEnd = null)
         {
             lock(lines)
             {
@@ -614,7 +664,7 @@ namespace Antmicro.Renode.Testing
                 {
                     timestamp = machine.ElapsedVirtualTime.TimeElapsed.TotalMilliseconds;
 
-                    content = currentLineBuffer.Unload();
+                    content = currentLineBuffer.Unload(matchEnd).Substring(matchStart);
                 }
                 else if(numberOfLinesToCopy > 0)
                 {
@@ -624,6 +674,10 @@ namespace Antmicro.Renode.Testing
                 }
 
                 lines.RemoveRange(0, numberOfLinesToCopy);
+                if(content != null && !binaryMode)
+                {
+                    content = content.StripNonSafeCharacters();
+                }
 
                 return new TerminalTesterResult(content, timestamp, matchGroups);
             }
@@ -650,11 +704,33 @@ namespace Antmicro.Renode.Testing
 
             if(includeCurrentLineBuffer)
             {
-                report.AppendFormat("{0} [[no newline]]\n", currentLineBuffer);
+                // Don't say there was no newline if we are in binary mode as it does not operate on lines
+                var newlineIndication = !binaryMode ? " [[no newline]]" : "";
+                var displayString = currentLineBuffer.ToString();
+                if(binaryMode)
+                {
+                    // Not using PrettyPrintCollection(Hex) to use simpler `01 02 03...` formatting.
+                    displayString = string.Join(" ", displayString.Select(ch => ((byte)ch).ToHex()));
+                }
+                report.AppendFormat("{0}{1}\n", displayString, newlineIndication);
             }
 
             var virtMs = machine.ElapsedVirtualTime.TimeElapsed.TotalMilliseconds;
             report.AppendFormat("([host: {2}, virt: {3, 7}] {0} event: {1})\n", eventName, what, CustomDateTime.Now, virtMs);
+        }
+
+        private TerminalTesterResult MatchFailingStrings()
+        {
+            foreach(var failingString in failingStrings)
+            {
+                var lineMatch = CheckFinishedLines(failingString.pattern, failingString.treatAsRegex, "error", false);
+                if(lineMatch != null)
+                {
+                    lineMatch.isFailingString = true;
+                    return lineMatch;
+                }
+            }
+            return null;
         }
 
         private IMachine machine;
@@ -676,10 +752,11 @@ namespace Antmicro.Renode.Testing
         private readonly SafeStringBuilder currentLineBuffer;
         private readonly SafeStringBuilder sgrDecodingBuffer;
         private readonly EndLineOption endLineOption;
-        private readonly bool removeColors;
+        private readonly bool binaryMode;
         private readonly List<Line> lines;
         private readonly SafeStringBuilder report;
         private readonly Queue<Tuple<TimeSpan, char>> delayedChars = new Queue<Tuple<TimeSpan, char>>();
+        private readonly List<FailingString> failingStrings;
 
         private const char LineFeed = '\x0A';
         private const char CarriageReturn = '\x0D';
@@ -769,20 +846,34 @@ namespace Antmicro.Renode.Testing
             EscapeDetected,
             LeftBracketDetected
         }
+
+        private struct FailingString
+        {
+            public string pattern;
+            public bool treatAsRegex;
+
+            public FailingString(string pattern, bool treatAsRegex)
+            {
+                this.pattern = pattern;
+                this.treatAsRegex = treatAsRegex;
+            }
+        }
     }
 
     public class TerminalTesterResult
     {
-        public TerminalTesterResult(string content, double timestamp, string[] groups = null)
+        public TerminalTesterResult(string content, double timestamp, string[] groups = null, bool isFailingString = false)
         {
-            this.line = content == null ? string.Empty : content.StripNonSafeCharacters();
+            this.line = content ?? string.Empty;
             this.timestamp = timestamp;
             this.groups = groups ?? new string[0];
+            this.isFailingString = isFailingString;
         }
 
         public string line { get; }
         public double timestamp { get; }
         public string[] groups { get; set; }
+        public bool isFailingString;
     }
 
     public enum EndLineOption

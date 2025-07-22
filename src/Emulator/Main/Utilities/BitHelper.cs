@@ -87,7 +87,7 @@ namespace Antmicro.Renode.Utilities
             ulong mask = ulong.MaxValue;
             foreach(var bit in bits)
             {
-                mask -= 1u << bit;
+                mask -= 1ul << bit;
             }
             reg &= mask;
         }
@@ -107,7 +107,7 @@ namespace Antmicro.Renode.Utilities
             ulong mask = ulong.MaxValue;
             for(var i = 0; i < width; i++)
             {
-                mask -= 1u << (position + i);
+                mask -= 1ul << (position + i);
             }
             reg &= mask;
         }
@@ -124,10 +124,10 @@ namespace Antmicro.Renode.Utilities
 
         public static void SetBits(ref ulong reg, int position, int width)
         {
-            var mask = 0x0u;
+            var mask = 0x0ul;
             for(var i = 0; i < width; i++)
             {
-                mask += 1u << (position + i);
+                mask += 1ul << (position + i);
             }
             reg |= mask;
         }
@@ -401,6 +401,17 @@ namespace Antmicro.Renode.Utilities
             return result;
         }
 
+        public static uint GetSetBitsCount(ulong value)
+        {
+            var count = 0u;
+            while(value != 0)
+            {
+                count++;
+                value &= value - 1;
+            }
+            return count;
+        }
+
         public static string GetSetBitsPretty(ulong reg)
         {
             var setBits = new HashSet<int>(GetSetBits(reg));
@@ -557,7 +568,7 @@ namespace Antmicro.Renode.Utilities
         }
 
         public static void SetMaskedValue(ref ulong reg, ulong value, int maskOffset, int maskSize)
-        {            
+        {
             var mask = CalculateQuadWordMask(maskSize, maskOffset);
             value <<= maskOffset;
             value &= mask;
@@ -732,8 +743,18 @@ namespace Antmicro.Renode.Utilities
 
         private static void AssertMaskParameters(int width, int position, int maxWidth)
         {
-            DebugHelper.Assert(width >= 0 && position >= 0, $"Width (0x{width:X}) and position (0x{position:X}) should be grater than 0.");
-            DebugHelper.Assert(checked(width + position) <= maxWidth, $"Sum of width (0x{width:X}) and position (0x{position:X}) should be lower than or equal to {maxWidth}.");
+            if(width < 0)
+            {
+                throw new ArgumentException($"'{nameof(width)}' (0x{width:X}) should be grater than 0.");
+            }
+            if(position < 0)
+            {
+                throw new ArgumentException($"'{nameof(position)} ({position}) should be grater than or equal to 0.");
+            }
+            if(checked(width + position) > maxWidth)
+            {
+                throw new ArgumentException($"Sum of '{nameof(width)}' ({width}) and '{nameof(position)}' ({position}) should be less than or equal to {maxWidth}.");
+            }
         }
 
         private static bool[] GetBitsInner(ulong reg, int length)

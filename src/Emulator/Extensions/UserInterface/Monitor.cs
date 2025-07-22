@@ -7,6 +7,7 @@
 //
 using System;
 using Antmicro.Renode.Core;
+using Antmicro.Renode.Peripherals;
 using Antmicro.Renode.Exceptions;
 using Antmicro.Renode.Logging;
 using Antmicro.Renode.Sockets;
@@ -125,6 +126,7 @@ namespace Antmicro.Renode.UserInterface
         private void RegisterResetCommand(IMachine machine)
         {
             machine.MachineReset += ResetMachine;
+            machine.PeripheralReset += ResetPeripheral;
         }
 
         private void UpdateMonitorPrompt(IMachine machine)
@@ -263,11 +265,41 @@ namespace Antmicro.Renode.UserInterface
             string machineName;
             if(EmulationManager.Instance.CurrentEmulation.TryGetMachineName(machine, out machineName))
             {
-                var activeMachine = _currentMachine;
-                _currentMachine = machine;
-                var macroName = GetVariableName("reset");
-                Token resetMacro;
-                if(macros.TryGetValue(macroName, out resetMacro))
+                using(ObtainMachineContext(machine))
+                {
+                    var macroName = GetVariableName("reset");
+                    Token resetMacro;
+                    if(macros.TryGetValue(macroName, out resetMacro))
+                    {
+                        var macroLines = resetMacro.GetObjectValue().ToString().Split('\n');
+                        foreach(var line in macroLines)
+                        {
+                            Parse(line, Interaction);
+                        }
+                    }
+                    else
+                    {
+                        Logger.LogAs(this, LogLevel.Warning, "No action for reset - macro {0} is not registered.", macroName);
+                    }
+                }
+            }
+        }
+
+        private void ResetPeripheral(IMachine machine, IPeripheral peripheral)
+        {
+            string macroName;
+            if(machine.TryGetLocalName(peripheral, out var localName))
+            {
+                macroName = $"{localName}.reset";
+            }
+            else
+            {
+                return;
+            }
+
+            using(ObtainMachineContext(machine))
+            {
+                if(TryExpandVariable(new VariableToken(macroName), macros, out var resetMacro))
                 {
                     var macroLines = resetMacro.GetObjectValue().ToString().Split('\n');
                     foreach(var line in macroLines)
@@ -275,11 +307,6 @@ namespace Antmicro.Renode.UserInterface
                         Parse(line, Interaction);
                     }
                 }
-                else
-                {
-                    Logger.LogAs(this, LogLevel.Warning, "No action for reset - macro {0} is not registered.", macroName);
-                }
-                _currentMachine = activeMachine;
             }
         }
 
@@ -518,6 +545,28 @@ namespace Antmicro.Renode.UserInterface
             return true;
         }
 
+        public bool SetPeripheralMacro(IPeripheral peripheral, string macroName, string contents, IMachine machine = null)
+        {
+            machine = machine ?? currentMachine;
+            string variablePrefix;
+            if(peripheral == null)
+            {
+                variablePrefix = "";
+            }
+            else if(machine.TryGetLocalName(peripheral, out variablePrefix))
+            {
+                variablePrefix += ".";
+            }
+            else
+            {
+                return false;
+            }
+
+            var variableName = GetVariableName($"{variablePrefix}{macroName}");
+            SetVariable(variableName, new StringToken(contents), macros);
+            return true;
+        }
+
         private string GetVariableName(string variableName)
         {
             var elements = variableName.Split(new[] { '.' }, 2);
@@ -534,6 +583,13 @@ namespace Antmicro.Renode.UserInterface
                 }
             }
             return variableName;
+        }
+
+        private IDisposable ObtainMachineContext(IMachine machine)
+        {
+            var activeMachine = _currentMachine;
+            _currentMachine = machine;
+            return DisposableWrapper.New(() => _currentMachine = activeMachine);
         }
 
         public bool TryCompilePlugin(string filename, ICommandInteraction writer = null)
@@ -690,7 +746,7 @@ namespace Antmicro.Renode.UserInterface
 
         public object GetVariable(string name)
         {
-            return variables.GetOrDefault(GetVariableName(name))?.GetObjectValue();
+            return TryExpandVariable(new VariableToken(name), variables, out var value) ? value.GetObjectValue() : null;
         }
 
         private bool TryGetFilenameFromAvailablePaths(string fileName, out string fullPath)

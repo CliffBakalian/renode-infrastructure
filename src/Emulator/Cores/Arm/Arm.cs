@@ -75,6 +75,11 @@ namespace Antmicro.Renode.Peripherals.CPU
             machine.UnregisterAsAChildOf(this, peripheral);
         }
 
+        public bool GetArmFeature(ArmFeatures feature)
+        {
+            return TlibGetArmFeature((int)feature) > 0;
+        }
+
         public override string Architecture { get { return "arm"; } }
 
         //gdb does not contain arm-m and armv7 as independent architecteures so we need to pass "arm" in every case.
@@ -544,6 +549,9 @@ namespace Antmicro.Renode.Peripherals.CPU
         [Import]
         public Action<uint> TlibSetExceptionVectorAddress;
 
+        [Import]
+        private Func<int, uint> TlibGetArmFeature;
+
 #pragma warning restore 649
 
         private readonly string[] ExceptionDescriptions =
@@ -558,6 +566,16 @@ namespace Antmicro.Renode.Peripherals.CPU
             "Kernel Trap",
             "STREX instruction"
         };
+
+        // NOTE: Needs to be updated on every tlib/arch/arm/cpu.h change
+        public enum ArmFeatures
+        {
+            ARM_FEATURE_VFP = 0,
+            ARM_FEATURE_VFP3 = 10,
+            ARM_FEATURE_VFP_FP16 = 11,
+            ARM_FEATURE_NEON = 12,
+            ARM_FEATURE_VFP4 = 22,
+        }
 
         protected struct Coprocessor32BitMoveInstruction
         {
